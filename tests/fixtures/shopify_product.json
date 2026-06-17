@@ -1,0 +1,27 @@
+{
+  "title": "Classic T-Shirt, C Logo",
+  "handle": "classic-t-shirt-c-logo-bright-white",
+  "variants": [
+    {
+      "id": 101,
+      "title": "Bright White / M",
+      "available": true,
+      "price": 1500,
+      "sku": "TEE-WHT-M"
+    },
+    {
+      "id": 102,
+      "title": "Bright White / XL",
+      "available": true,
+      "price": 1500,
+      "sku": "TEE-WHT-XL"
+    },
+    {
+      "id": 103,
+      "title": "Bright White / 2XL",
+      "available": false,
+      "price": 1500,
+      "sku": "TEE-WHT-2XL"
+    }
+  ]
+}
