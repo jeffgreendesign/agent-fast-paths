@@ -4,6 +4,8 @@ import importlib.util
 import json
 import pathlib
 import sys
+
+import pytest
 from types import ModuleType
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -50,6 +52,17 @@ def test_find_variant_by_options_ignores_option_order() -> None:
     assert variant["id"] == 102
 
 
+def test_find_variant_by_options_rejects_ambiguous_partial_options() -> None:
+    product = {
+        "variants": [
+            {"id": 1, "title": "Bright White / XL"},
+            {"id": 2, "title": "Black / XL"},
+        ]
+    }
+    with pytest.raises(svc.VariantNotFoundError, match="ambiguous option match"):
+        svc.find_variant_by_options(product, ["XL"])
+
+
 def test_summarize_variant_converts_cents() -> None:
     variant = svc.find_variant(FIXTURE, "Bright White / XL")
     summary = svc.summarize_variant(FIXTURE, variant, "https://example.com/products/x.js")
@@ -88,3 +101,23 @@ def test_cli_outputs_option_match_json(capsys, monkeypatch) -> None:
     out = json.loads(capsys.readouterr().out)
     assert out["variant"] == "Bright White / XL"
     assert out["available"] is True
+
+
+def test_cli_rejects_variant_and_option_together(monkeypatch) -> None:
+    monkeypatch.setattr(svc, "fetch_json", lambda *args, **kwargs: FIXTURE)
+    with pytest.raises(SystemExit) as exc:
+        svc.main([
+            "https://example.com/products/classic-t-shirt",
+            "--variant",
+            "Bright White / XL",
+            "--option",
+            "Bright White",
+        ])
+    assert exc.value.code != 0
+
+
+def test_cli_rejects_missing_selection_mode(monkeypatch) -> None:
+    monkeypatch.setattr(svc, "fetch_json", lambda *args, **kwargs: FIXTURE)
+    with pytest.raises(SystemExit) as exc:
+        svc.main(["https://example.com/products/classic-t-shirt"])
+    assert exc.value.code != 0

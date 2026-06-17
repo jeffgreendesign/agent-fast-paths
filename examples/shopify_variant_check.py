@@ -87,16 +87,27 @@ def find_variant_by_options(product: dict[str, Any], option_values: list[str]) -
     Exact option equality avoids false matches like XL inside 2XL, 3XL, or XLT.
     Option order is ignored because Shopify stores vary by color/size ordering.
     """
-    wanted = set(option_values)
+    wanted = {value.strip() for value in option_values if value and value.strip()}
+    if not wanted:
+        raise VariantNotFoundError("empty option selection")
+
+    matches: list[dict[str, Any]] = []
     for variant in product.get("variants", []):
         options = {
-            value
+            str(value).strip()
             for value in (variant.get("option1"), variant.get("option2"), variant.get("option3"))
-            if value is not None
+            if value is not None and str(value).strip()
         }
         title_parts = {part.strip() for part in str(variant.get("title", "")).split("/") if part.strip()}
         if wanted.issubset(options or title_parts):
-            return variant
+            matches.append(variant)
+
+    if len(matches) == 1:
+        return matches[0]
+    if len(matches) > 1:
+        raise VariantNotFoundError(
+            f"ambiguous option match ({len(matches)} variants); provide more --option values"
+        )
     raise VariantNotFoundError(" + ".join(option_values))
 
 
