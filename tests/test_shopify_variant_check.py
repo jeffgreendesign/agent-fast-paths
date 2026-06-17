@@ -103,8 +103,12 @@ def test_cli_outputs_option_match_json(capsys, monkeypatch) -> None:
     assert out["available"] is True
 
 
-def test_cli_rejects_variant_and_option_together(monkeypatch) -> None:
-    monkeypatch.setattr(svc, "fetch_json", lambda *args, **kwargs: FIXTURE)
+def test_cli_rejects_variant_and_option_together(capsys, monkeypatch) -> None:
+    monkeypatch.setattr(
+        svc,
+        "fetch_json",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("fetch_json should not be called")),
+    )
     with pytest.raises(SystemExit) as exc:
         svc.main([
             "https://example.com/products/classic-t-shirt",
@@ -114,10 +118,16 @@ def test_cli_rejects_variant_and_option_together(monkeypatch) -> None:
             "Bright White",
         ])
     assert exc.value.code != 0
+    assert "provide exactly one of --variant or repeatable --option" in capsys.readouterr().err
 
 
-def test_cli_rejects_missing_selection_mode(monkeypatch) -> None:
-    monkeypatch.setattr(svc, "fetch_json", lambda *args, **kwargs: FIXTURE)
+def test_cli_rejects_missing_selection_mode(capsys, monkeypatch) -> None:
+    monkeypatch.setattr(
+        svc,
+        "fetch_json",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("fetch_json should not be called")),
+    )
     with pytest.raises(SystemExit) as exc:
         svc.main(["https://example.com/products/classic-t-shirt"])
     assert exc.value.code != 0
+    assert "provide exactly one of --variant or repeatable --option" in capsys.readouterr().err
