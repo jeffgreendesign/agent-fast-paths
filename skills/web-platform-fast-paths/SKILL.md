@@ -85,16 +85,123 @@ for url in urls:
 PY
 ```
 
-Variant filtering example:
+### Shopify exact-variant hunt, when the user asks for N available products
+
+Use this before browser/page extraction. It should normally solve a task like “find three men’s Bright White shirts in XL” in 2-4 tool calls.
+
+1. Probe the obvious collection endpoint first, but do not linger on guessed collection slugs:
+   - Try likely category handles such as `/collections/mens-t-shirt-tops/products.json?limit=250`.
+   - If a guessed collection returns empty, immediately use `/sitemap.xml` to discover collection handles instead of trying many guesses.
+2. If the collection is broad enough, filter those product objects directly. Shopify collection JSON includes variants, options, tags, and product type.
+3. If collection discovery is unclear, use `/sitemap.xml` → `sitemap_products_*.xml?...` and filter product URLs by handle tokens such as `bright-white`, `shirt`, `t-shirt`, `tee`, `polo`, or the requested color/category.
+4. Fetch `/products/<handle>.js` only for candidate handles, then stop when you have enough exact available matches.
+5. Only crawl `/products.json?limit=250&page=N` when sitemap/collection/search endpoints do not produce enough candidates. If you must crawl it, stop as soon as the requested count is verified.
+
+Copyable exact-match sweep:
+
+```bash
+python3 - <<'PY'
+import html, json, re, urllib.request
+from urllib.parse import urlparse
+
+base = 'https://example.com'
+wanted_color = 'Bright White'
+wanted_size = 'XL'
+need = 3
+handle_tokens = ('bright-white', 'shirt', 't-shirt', 'tee', 'polo')
+exclude_tokens = ('tank', 'dress', 'bra', 'skort')  # adjust for the requested category
+
+headers = {'User-Agent': 'Mozilla/5.0', 'Accept': 'application/json,text/xml,*/*'}
+
+def get(url):
+    return urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=20).read().decode()
+
+def product_matches(product, handle):
+    blob = ' '.join([
+        handle,
+        product.get('title', ''),
+        product.get('product_type', ''),
+        ' '.join(product.get('tags', [])),
+    ]).lower()
+    return any(t in blob for t in handle_tokens) and not any(t in blob for t in exclude_tokens)
+
+def exact_variant(product):
+    for v in product.get('variants', []):
+        opts = [v.get('option1'), v.get('option2'), v.get('option3')]
+        # Prefer option equality over substring matching so XL != 2XL/3XL/XLT.
+        if wanted_color in opts and wanted_size in opts:
+            return v
+    return None
+
+def dollars(price):
+    if price is None:
+        return None
+    # Shopify product JSON may expose cents as int or decimal dollars as a string.
+    if isinstance(price, int):
+        return price / 100
+    s = str(price).strip().replace('$', '').replace(',', '')
+    return float(s) if '.' in s else int(s) / 100
+
+handles = []
+# 1) Prefer a known collection if you have one.
+for coll in ('mens-t-shirt-tops', 'mens-t-shirts-tops', 'mens-shirts'):
+    try:
+        data = json.loads(get(f'{base}/collections/{coll}/products.json?limit=250'))
+    except Exception:
+        continue
+    for p in data.get('products', []):
+        if product_matches(p, p.get('handle', '')) and exact_variant(p):
+            handles.append(p['handle'])
+    if len(handles) >= need:
+        break
+
+# 2) Fall back to sitemap-discovered product handles, not page extraction.
+if len(handles) < need:
+    sm = get(f'{base}/sitemap.xml')
+    product_maps = re.findall(r'<loc>([^<]*sitemap_products_[^<]+)</loc>', sm)
+    for sm_url in product_maps:
+        text = get(html.unescape(sm_url))
+        urls = re.findall(r'<loc>(https?://[^<]+/products/[^<]+)</loc>', text)
+        for u in urls:
+            h = urlparse(html.unescape(u)).path.rsplit('/products/', 1)[-1]
+            if all(t not in h for t in handle_tokens):
+                continue
+            handles.append(h)
+
+seen = set()
+for h in handles:
+    if h in seen:
+        continue
+    seen.add(h)
+    try:
+        product = json.loads(get(f'{base}/products/{h}.js'))
+    except Exception:
+        continue
+    variant = exact_variant(product)
+    if product_matches(product, h) and variant and variant.get('available') is True:
+        print(json.dumps({
+            'product': product.get('title'),
+            'url': f'{base}/products/{h}',
+            'variant': variant.get('title'),
+            'available': variant.get('available'),
+            'price': dollars(variant.get('price')),
+            'variant_id': variant.get('id'),
+        }, sort_keys=True))
+        need -= 1
+        if need == 0:
+            break
+PY
+```
+
+Variant filtering example for an already-fetched product:
 
 ```python
 wanted_color = 'Bright White'
 wanted_size = 'XL'
 for v in obj['variants']:
-    title = v.get('title', '')
-    exact_size = title.endswith(f'/ {wanted_size}') or f'/ {wanted_size} /' in title
-    if wanted_color in title and exact_size:
-        print(title, v['available'], v['price'] / 100)
+    opts = [v.get('option1'), v.get('option2'), v.get('option3')]
+    if wanted_color in opts and wanted_size in opts:
+        print(v['title'], v['available'], v['price'])
 ```
 
 Collection sweep example:
@@ -102,10 +209,11 @@ Collection sweep example:
 ```bash
 python3 - <<'PY'
 import json, urllib.request
-url='https://example.com/collections/mens-t-shirts/products.json?limit=250'
+url='https://example.com/collections/mens-t-shirt-tops/products.json?limit=250'
 data=json.loads(urllib.request.urlopen(url,timeout=20).read().decode())
 for p in data.get('products', []):
-    if 'shirt' in p.get('title','').lower():
+    blob = ' '.join([p.get('title',''), p.get('product_type',''), ' '.join(p.get('tags', []))]).lower()
+    if 'shirt' in blob or 'tee' in blob or 'polo' in blob:
         print(p['title'], p['handle'])
 PY
 ```
@@ -230,11 +338,13 @@ Fix saved: use `web-platform-fast-paths` for future product/platform lookups.
 
 4. **Forgetting cents.** Shopify product JSON usually stores price as cents, e.g. `1875` = `$18.75`.
 
-5. **Over-probing broad catalogs.** For a quick user request, find enough exact options. Do not crawl the whole store unless asked.
+5. **Over-probing broad catalogs.** For a quick user request, find enough exact options. Do not crawl the whole store unless asked. Prefer collection JSON and sitemap-discovered product handles before `/products.json?page=N` pagination.
 
-6. **Ignoring side-effect boundaries.** Reading public JSON is fine. Adding to cart, reserving inventory, logging in, or buying requires explicit approval.
+6. **Lingering on guessed collection slugs.** One miss is useful signal; many misses waste time. If `/collections/<guess>/products.json` is empty, inspect `/sitemap.xml` for real collection handles such as `mens-t-shirt-tops`.
 
-7. **Assuming all Shopify stores expose all products.** Some disable endpoints, hide products, paginate aggressively, or rely on apps. Fall back to JSON-LD, sitemap, search suggest, or browser.
+7. **Ignoring side-effect boundaries.** Reading public JSON is fine. Adding to cart, reserving inventory, logging in, or buying requires explicit approval.
+
+8. **Assuming all Shopify stores expose all products.** Some disable endpoints, hide products, paginate aggressively, or rely on apps. Fall back to JSON-LD, sitemap, search suggest, or browser.
 
 ## Verification Checklist
 
