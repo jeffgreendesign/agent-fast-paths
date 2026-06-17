@@ -27,7 +27,9 @@ Best for product availability, variants, price, handle, SKU, variant ID.
 Notes:
 
 - Product `.js` prices are usually integer cents.
-- Match exact variant titles. `XL` can appear inside `2XL`, `3XL`, etc.
+- Match exact option values when possible. Use `option1`/`option2`/`option3` equality for color/size, not substring matching; `XL` can appear inside `2XL`, `3XL`, `XLT`, etc.
+- For “find N products with exact variant available,” prefer collection JSON or sitemap-discovered handles, then fetch only candidate `/products/<handle>.js` files. Avoid broad `/products.json` pagination until targeted discovery fails.
+- If a guessed collection slug returns empty, inspect `/sitemap.xml` for the real collection/product sitemap URLs instead of trying many guessed slugs.
 - Public JSON confirms a current public product state; it does not reserve inventory.
 - Some stores disable or restrict broad product-list endpoints.
 

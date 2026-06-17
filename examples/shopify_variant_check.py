@@ -81,6 +81,25 @@ def find_variant(product: dict[str, Any], variant_title: str) -> dict[str, Any]:
     raise VariantNotFoundError(variant_title)
 
 
+def find_variant_by_options(product: dict[str, Any], option_values: list[str]) -> dict[str, Any]:
+    """Find a variant by exact option values, e.g. Bright White + XL.
+
+    Exact option equality avoids false matches like XL inside 2XL, 3XL, or XLT.
+    Option order is ignored because Shopify stores vary by color/size ordering.
+    """
+    wanted = set(option_values)
+    for variant in product.get("variants", []):
+        options = {
+            value
+            for value in (variant.get("option1"), variant.get("option2"), variant.get("option3"))
+            if value is not None
+        }
+        title_parts = {part.strip() for part in str(variant.get("title", "")).split("/") if part.strip()}
+        if wanted.issubset(options or title_parts):
+            return variant
+    raise VariantNotFoundError(" + ".join(option_values))
+
+
 def summarize_variant(product: dict[str, Any], variant: dict[str, Any], source_url: str) -> dict[str, Any]:
     price_cents, price = normalize_price(variant.get("price"))
     return {
@@ -99,15 +118,28 @@ def summarize_variant(product: dict[str, Any], variant: dict[str, Any], source_u
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("url", help="Shopify product URL or /products/<handle>.js URL")
-    parser.add_argument("--variant", required=True, help="Exact variant title, e.g. 'Bright White / XL'")
+    parser.add_argument("--variant", help="Exact variant title, e.g. 'Bright White / XL'")
+    parser.add_argument(
+        "--option",
+        action="append",
+        default=[],
+        help="Exact option value to match, repeatable, e.g. --option 'Bright White' --option XL",
+    )
     parser.add_argument("--timeout", type=int, default=15)
     parser.add_argument("--pretty", action="store_true", help="Pretty-print JSON")
     args = parser.parse_args(argv)
 
+    if bool(args.variant) == bool(args.option):
+        parser.error("provide exactly one of --variant or repeatable --option")
+
     try:
         json_url = product_json_url(args.url)
         product = fetch_json(json_url, timeout=args.timeout)
-        variant = find_variant(product, args.variant)
+        variant = (
+            find_variant(product, args.variant)
+            if args.variant
+            else find_variant_by_options(product, args.option)
+        )
         result = summarize_variant(product, variant, json_url)
     except (ValueError, VariantNotFoundError, urllib.error.URLError, json.JSONDecodeError, TypeError) as exc:
         print(json.dumps({"ok": False, "error": str(exc)}), file=sys.stderr)

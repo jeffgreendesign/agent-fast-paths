@@ -39,6 +39,17 @@ def test_find_variant_matches_exact_xl_not_2xl() -> None:
     assert variant["title"] != "Bright White / 2XL"
 
 
+def test_find_variant_by_options_matches_exact_xl_not_2xl() -> None:
+    variant = svc.find_variant_by_options(FIXTURE, ["Bright White", "XL"])
+    assert variant["id"] == 102
+    assert variant["title"] == "Bright White / XL"
+
+
+def test_find_variant_by_options_ignores_option_order() -> None:
+    variant = svc.find_variant_by_options(FIXTURE, ["XL", "Bright White"])
+    assert variant["id"] == 102
+
+
 def test_summarize_variant_converts_cents() -> None:
     variant = svc.find_variant(FIXTURE, "Bright White / XL")
     summary = svc.summarize_variant(FIXTURE, variant, "https://example.com/products/x.js")
@@ -62,3 +73,18 @@ def test_cli_outputs_variant_json(capsys, monkeypatch) -> None:
     out = json.loads(capsys.readouterr().out)
     assert out["available"] is True
     assert out["price"] == 15.0
+
+
+def test_cli_outputs_option_match_json(capsys, monkeypatch) -> None:
+    monkeypatch.setattr(svc, "fetch_json", lambda *args, **kwargs: FIXTURE)
+    code = svc.main([
+        "https://example.com/products/classic-t-shirt",
+        "--option",
+        "Bright White",
+        "--option",
+        "XL",
+    ])
+    assert code == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["variant"] == "Bright White / XL"
+    assert out["available"] is True
