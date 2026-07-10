@@ -13,6 +13,64 @@ from agent_fast_paths_mcp import server  # noqa: E402
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 FIXTURE = json.loads((ROOT / "tests" / "fixtures" / "shopify_product.json").read_text())
 
+# Capture the real SSRF guard before the autouse fixture stubs it out, so the
+# guard's own tests can exercise it without touching the network.
+_real_assert_fetchable = server._assert_fetchable
+
+
+@pytest.fixture(autouse=True)
+def _bypass_ssrf_guard(monkeypatch):
+    # Tool-behavior tests fetch mocked data; skip the guard's real DNS lookups.
+    monkeypatch.setattr(server, "_assert_fetchable", lambda *a, **k: None)
+
+
+def _addrinfo(ip: str):
+    return [(2, 1, 6, "", (ip, 80))]
+
+
+def test_ssrf_guard_rejects_non_http_scheme() -> None:
+    with pytest.raises(server.BlockedURLError, match="scheme"):
+        _real_assert_fetchable("file:///etc/passwd")
+
+
+def test_ssrf_guard_blocks_loopback(monkeypatch) -> None:
+    monkeypatch.setattr(server.socket, "getaddrinfo", lambda *a, **k: _addrinfo("127.0.0.1"))
+    with pytest.raises(server.BlockedURLError, match="non-public"):
+        _real_assert_fetchable("http://localhost/admin")
+
+
+def test_ssrf_guard_blocks_cloud_metadata(monkeypatch) -> None:
+    monkeypatch.setattr(server.socket, "getaddrinfo", lambda *a, **k: _addrinfo("169.254.169.254"))
+    with pytest.raises(server.BlockedURLError, match="non-public"):
+        _real_assert_fetchable("http://metadata.internal/latest/meta-data/")
+
+
+def test_ssrf_guard_blocks_private_range(monkeypatch) -> None:
+    monkeypatch.setattr(server.socket, "getaddrinfo", lambda *a, **k: _addrinfo("10.0.0.5"))
+    with pytest.raises(server.BlockedURLError, match="non-public"):
+        _real_assert_fetchable("https://intranet.example/")
+
+
+def test_ssrf_guard_allows_public_address(monkeypatch) -> None:
+    monkeypatch.setattr(server.socket, "getaddrinfo", lambda *a, **k: _addrinfo("93.184.216.34"))
+    # Should not raise.
+    _real_assert_fetchable("https://example.com/products/x.js")
+
+
+def test_ssrf_guard_allow_local_opt_in(monkeypatch) -> None:
+    monkeypatch.setattr(server, "_ALLOW_LOCAL", True)
+    # With the opt-in set, loopback is permitted and DNS is not even consulted.
+    _real_assert_fetchable("http://127.0.0.1:9292/products/x.js")
+
+
+def test_probe_platform_blocks_private_url(monkeypatch) -> None:
+    # Restore the real guard (autouse stubbed it) and exercise it through a tool.
+    # A numeric IP host needs no DNS, so this stays offline.
+    monkeypatch.setattr(server, "_assert_fetchable", _real_assert_fetchable)
+    result = server.probe_platform("http://169.254.169.254/latest/meta-data/")
+    assert result["ok"] is False
+    assert "blocked_url" in result["error"]
+
 
 def test_tools_are_registered() -> None:
     # Use FastMCP's public (async) tool-listing API rather than private internals.

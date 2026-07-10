@@ -47,6 +47,23 @@ Claude Code `.mcp.json`):
 }
 ```
 
+## Security: SSRF guard and trust model
+
+The tools fetch agent-supplied URLs, so each request is validated first: only
+`http(s)` is allowed, and the host must resolve to a **public** address. Requests
+to loopback, RFC1918/private, link-local (including the cloud-metadata endpoint
+`169.254.169.254`), reserved, multicast, or unspecified addresses are rejected
+with a `blocked_url` error. Sitemap-index entries are re-validated before they
+are fetched.
+
+Caveat: the guard checks the URL you pass; it does **not** re-validate HTTP
+redirect hops (urllib follows those internally). Treat this server as
+**trusted-caller only** — don't expose it to fully untrusted input where a
+redirect-based SSRF would matter.
+
+To allow localhost/private hosts for local development (e.g. a dev store on
+`127.0.0.1`), set `AGENT_FAST_PATHS_ALLOW_LOCAL=1` in the server's environment.
+
 ## First-party alternative
 
 For your own store, Shopify and WooCommerce now ship official MCP servers with

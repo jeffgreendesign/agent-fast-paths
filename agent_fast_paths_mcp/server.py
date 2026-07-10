@@ -11,7 +11,10 @@ from __future__ import annotations
 
 import dataclasses
 import html
+import ipaddress
+import os
 import re
+import socket
 import urllib.error
 import urllib.parse
 from typing import Any
@@ -23,9 +26,59 @@ from ._load import shopify as _shopify
 
 mcp = FastMCP("agent-fast-paths")
 
+# Opt-in escape hatch for local development (e.g. a Shopify store on localhost).
+# Off by default so a prompt-injected tool call can't reach loopback/private hosts.
+_ALLOW_LOCAL = os.environ.get("AGENT_FAST_PATHS_ALLOW_LOCAL", "").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+
+
+class BlockedURLError(ValueError):
+    """Raised when a URL uses a disallowed scheme or resolves to a private host."""
+
 
 def _error(message: str, **extra: Any) -> dict[str, Any]:
     return {"ok": False, "error": message, **extra}
+
+
+def _assert_fetchable(url: str) -> None:
+    """SSRF guard: allow only http(s) URLs that resolve to public addresses.
+
+    Blocks loopback, RFC1918/private, link-local (incl. cloud metadata at
+    169.254.169.254), reserved, multicast, and unspecified targets before any
+    fetch, unless AGENT_FAST_PATHS_ALLOW_LOCAL is set. This validates the URL the
+    caller passes; it does not re-validate redirect hops (urllib follows those
+    internally), so treat the server as trusted-caller only — see the README.
+    """
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme not in {"http", "https"}:
+        raise BlockedURLError(
+            f"blocked_url: scheme {parsed.scheme!r} not allowed (http/https only)"
+        )
+    host = parsed.hostname
+    if not host:
+        raise BlockedURLError("blocked_url: missing host")
+    if _ALLOW_LOCAL:
+        return
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    try:
+        infos = socket.getaddrinfo(host, port, proto=socket.IPPROTO_TCP)
+    except socket.gaierror as exc:
+        raise BlockedURLError(f"blocked_url: cannot resolve {host!r}: {exc}") from exc
+    for info in infos:
+        ip = ipaddress.ip_address(info[4][0])
+        if (
+            ip.is_private
+            or ip.is_loopback
+            or ip.is_link_local
+            or ip.is_reserved
+            or ip.is_multicast
+            or ip.is_unspecified
+        ):
+            raise BlockedURLError(f"blocked_url: {host} resolves to non-public address {ip}")
 
 
 def _site_root(url: str) -> str:
@@ -43,6 +96,7 @@ def probe_platform(url: str, timeout: int = 15) -> dict[str, Any]:
     and returns likely platforms plus fast-path endpoints worth trying next.
     """
     try:
+        _assert_fetchable(url)
         text = _probe.fetch_text(url, timeout=timeout)
         result = _probe.probe(url, text)
     except Exception as exc:  # mirror the probe CLI: never crash the agent
@@ -68,6 +122,7 @@ def shopify_check_variant(
         return _error("provide exactly one of 'variant' or 'options'")
     try:
         json_url = _shopify.product_json_url(url)
+        _assert_fetchable(json_url)
         product, source_url = _shopify.fetch_product(json_url, timeout=timeout)
         matched = (
             _shopify.find_variant(product, variant)
@@ -116,6 +171,9 @@ def shopify_find_available(
     notes: list[str] = []
     try:
         root = _site_root(base_url)
+        # All collection/product/sitemap fetches are same-host as base_url, so
+        # validating the root here covers them (sitemap entries are re-checked).
+        _assert_fetchable(root)
     except ValueError as exc:
         return _error(str(exc))
 
@@ -221,7 +279,10 @@ def _discover_handles_from_sitemap(
     for sm_url in product_sitemaps:
         if len(handles) >= handle_budget:
             break
+        # A sitemap index is remote content, so re-validate each entry (it could
+        # point off-host) before fetching it.
         try:
+            _assert_fetchable(sm_url)
             text = _probe.fetch_text(sm_url, timeout=timeout)
         except Exception:  # noqa: BLE001
             continue
