@@ -2,6 +2,18 @@
 
 Use these as cheap probes before falling back to generic page extraction or browser automation.
 
+## Prefer an official MCP server for first-party access (2026)
+
+As of 2026, the Model Context Protocol is the standard way agents connect to
+tools, and several platforms ship **official MCP servers** — including Shopify and
+WooCommerce. When you own the store (or have credentials/scope), an official MCP
+server is the fastest, most reliable "fast path" of all: authenticated,
+structured, and stable. The public JSON probes below remain the right tool for
+**third-party public research**, where you only have the public data surface.
+
+This repo also ships its own MCP server that wraps these public probes — see
+[`../agent_fast_paths_mcp/`](../agent_fast_paths_mcp/).
+
 ## General decision order
 
 1. Start from a supplied URL or exact search result.
@@ -32,6 +44,10 @@ Notes:
 - If a guessed collection slug returns empty, inspect `/sitemap.xml` for the real collection/product sitemap URLs instead of trying many guessed slugs.
 - Public JSON confirms a current public product state; it does not reserve inventory.
 - Some stores disable or restrict broad product-list endpoints.
+- If `/products/<handle>.js` is disabled (404/410), fall back to `/products/<handle>.json`, which returns the same data wrapped under a top-level `product` key.
+- Shopify rate-limits automated storefront traffic and returns **HTTP 430** (sometimes 429/503). Back off and honor `Retry-After` rather than hammering; the example script does this for you.
+- Shopify is investing new features **GraphQL-only** — the public REST/`.js`/`.json` surfaces still work for reads but are legacy, so expect the occasional gap and verify exact fields.
+- `urllib` does not transparently decode gzip/brotli; send `Accept-Encoding: identity` so a compressing CDN can't return bytes `json.loads` chokes on.
 
 ## WooCommerce
 
@@ -153,6 +169,47 @@ Avoid:
 - Mutating cart/checkout state.
 - Reading `window.checkoutConfig` except to understand page structure on cart/checkout pages.
 
+## React Router / Remix
+
+Remix merged into React Router v7, now common on commerce and content sites.
+
+Look for:
+
+```text
+window.__remixContext        # loader data embedded in the HTML
+*.data                       # single-fetch route data (append .data to a route URL)
+/_root.data                  # root loader data on some deployments
+```
+
+Notes:
+
+- Route loader data is often embedded in `window.__remixContext` or fetchable as `<route>.data`, so you can read structured page state without rendering.
+- Shapes vary by version and single-fetch config; treat these as probes, not guarantees.
+
+## Astro
+
+Astro ships mostly static HTML with hydrated "islands."
+
+Look for:
+
+- JSON-LD and Open Graph tags first — Astro pages usually render real HTML, so structured metadata is present.
+- `astro-island` elements whose `props` attribute carries JSON state for the hydrated component.
+
+## llms.txt
+
+An emerging convention (`/llms.txt`, and sometimes `/llms-full.txt`) where sites
+publish a curated, agent-friendly map of their most useful content.
+
+```text
+/llms.txt
+/llms-full.txt
+```
+
+Notes:
+
+- When present, it can point you straight at the canonical docs/product URLs, saving a discovery pass.
+- Adoption is uneven; check for it cheaply, but don't depend on it.
+
 ## Fast-path failure modes
 
 - Endpoint returns 404 or HTML instead of JSON.
@@ -161,5 +218,6 @@ Avoid:
 - Variant naming differs from user wording.
 - Search snippets show a different color or stale stock state.
 - Anti-bot systems block automated requests.
+- Rate limiting kicks in (e.g. Shopify HTTP 430); back off and honor `Retry-After` instead of retrying immediately.
 
 When a fast path fails, say what was tried and fall back to extraction or browser with a tighter target.

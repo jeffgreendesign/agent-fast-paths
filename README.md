@@ -26,8 +26,10 @@ This repo packages that correction as a reusable Hermes Agent skill plus small e
 skills/web-platform-fast-paths/SKILL.md   Hermes skill
 examples/shopify_variant_check.py         Shopify product variant checker
 examples/platform_probe.py                Lightweight platform probe helper
+agent_fast_paths_mcp/                      MCP server exposing the fast paths
 docs/platform-fast-paths.md               Endpoint patterns by platform
 docs/agent-experience-rubric.md           Quick rubric for rating agent behavior
+docs/optimizations-2026.md                80/20 optimization analysis (2026)
 ```
 
 ## Supported fast paths
@@ -67,6 +69,22 @@ Output shape:
 ```
 
 Stock and prices can change. Treat product JSON as a public current read, not an inventory reservation.
+
+## Use as an MCP server
+
+The same fast paths are packaged as a [Model Context Protocol](https://modelcontextprotocol.io)
+server, so any MCP-compatible agent can call them as tools — no copy-pasting.
+Tools: `probe_platform`, `shopify_check_variant`, and `shopify_find_available`.
+The example scripts stay stdlib-only; only this optional server adds a dependency.
+
+```bash
+uv sync --extra mcp
+uv run fast-paths-mcp        # serves over stdio
+```
+
+See [`agent_fast_paths_mcp/README.md`](agent_fast_paths_mcp/README.md) for client
+configuration. For a store you own, prefer the official Shopify/WooCommerce MCP
+servers; this server targets public, third-party research.
 
 ## Install the Hermes skill locally
 

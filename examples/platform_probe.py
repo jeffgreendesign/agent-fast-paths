@@ -15,7 +15,7 @@ import re
 import sys
 import urllib.parse
 import urllib.request
-from dataclasses import dataclass, asdict
+from dataclasses import asdict, dataclass
 from typing import Any
 
 
@@ -104,7 +104,12 @@ def probe(url: str, text: str) -> ProbeResult:
 
     if "wp-content" in lower or "wp-json" in lower or "woocommerce" in lower:
         platforms.append("wordpress-or-woocommerce")
-        paths.extend([f"{root}/wp-json/wp/v2/search?search=QUERY", f"{root}/wp-json/wc/store/v1/products?search=QUERY"])
+        paths.extend(
+            [
+                f"{root}/wp-json/wp/v2/search?search=QUERY",
+                f"{root}/wp-json/wc/store/v1/products?search=QUERY",
+            ]
+        )
 
     if "__next_data__" in lower or 'id="__next_data__"' in lower:
         platforms.append("nextjs")

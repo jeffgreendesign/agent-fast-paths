@@ -7,7 +7,41 @@ requires-python = ">=3.11"
 license = {text = "MIT"}
 authors = [{name = "Jeff Green"}]
 
+[project.optional-dependencies]
+# The MCP server is an optional add-on. The example scripts stay stdlib-only;
+# only this extra pulls in a third-party dependency.
+mcp = ["mcp>=1.12"]
+
+[project.scripts]
+fast-paths-mcp = "agent_fast_paths_mcp.server:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["agent_fast_paths_mcp"]
+
+[dependency-groups]
+dev = ["pytest>=8", "ruff>=0.10", "ty>=0.0.1a1"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
 addopts = "-q"
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+extend-exclude = ["docs", "skills"]
+
+[tool.ruff.lint]
+# A pragmatic, agent-code-friendly rule set: pyflakes, pycodestyle, import
+# sorting, pyupgrade, and flake8-bugbear.
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.ty.environment]
+python-version = "3.11"
+
+[tool.ty.src]
+include = ["examples", "agent_fast_paths_mcp", "tests"]
