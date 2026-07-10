@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 import time
 import urllib.error
@@ -28,6 +29,10 @@ class RateLimitedError(Exception):
 # Shopify returns 430 (and sometimes 429/503) when it rate-limits storefront
 # bot traffic. As of 2026 this is the common failure mode for automated reads.
 RETRY_STATUSES = frozenset({429, 430, 503})
+
+# Never sleep longer than this on a Retry-After header; a hostile or buggy
+# server could otherwise stall the caller indefinitely.
+MAX_RETRY_AFTER = 60.0
 
 
 def product_json_url(url: str) -> str:
@@ -52,14 +57,22 @@ def product_json_url(url: str) -> str:
 
 
 def _retry_after_seconds(exc: urllib.error.HTTPError) -> float | None:
-    """Parse a Retry-After header (delta-seconds form) if present."""
+    """Parse a Retry-After header (delta-seconds form), bounded and validated.
+
+    Returns None for missing/invalid/negative/non-finite values so the caller
+    falls back to exponential backoff. Caps the delay at ``MAX_RETRY_AFTER`` so a
+    hostile or buggy header can't stall the caller.
+    """
     value = exc.headers.get("Retry-After") if exc.headers else None
     if not value:
         return None
     try:
-        return float(value.strip())
+        seconds = float(value.strip())
     except (TypeError, ValueError):
         return None
+    if not math.isfinite(seconds) or seconds < 0:
+        return None
+    return min(seconds, MAX_RETRY_AFTER)
 
 
 def fetch_json(
@@ -82,7 +95,10 @@ def fetch_json(
     while True:
         try:
             with urllib.request.urlopen(request, timeout=timeout) as response:
-                return json.loads(response.read().decode("utf-8"))
+                data = json.loads(response.read().decode("utf-8"))
+            if not isinstance(data, dict):
+                raise ValueError(f"expected a JSON object, got {type(data).__name__}")
+            return data
         except urllib.error.HTTPError as exc:
             if exc.code in RETRY_STATUSES and attempt < retries:
                 delay = _retry_after_seconds(exc)
@@ -98,24 +114,26 @@ def fetch_json(
             raise
 
 
-def fetch_product(js_url: str, timeout: int = 15) -> dict[str, Any]:
+def fetch_product(js_url: str, timeout: int = 15) -> tuple[dict[str, Any], str]:
     """Fetch a Shopify product, falling back from `.js` to `.json` if disabled.
 
     Some stores turn off the `.js` view but leave `/products/<handle>.json`
     reachable. The `.json` view wraps the product under a top-level `product`
-    key, so unwrap it to return the same shape either way.
+    key, so unwrap it to return the same shape either way. Returns the product
+    together with the URL that actually served it, so callers can report the
+    live endpoint rather than the (possibly dead) `.js` URL.
     """
     try:
-        return fetch_json(js_url, timeout=timeout)
+        return fetch_json(js_url, timeout=timeout), js_url
     except urllib.error.HTTPError as exc:
         if exc.code not in (404, 410):
             raise
 
     json_url = js_url[:-3] + ".json" if js_url.endswith(".js") else js_url
     data = fetch_json(json_url, timeout=timeout)
-    if isinstance(data, dict) and "variants" not in data and isinstance(data.get("product"), dict):
-        return data["product"]
-    return data
+    if "variants" not in data and isinstance(data.get("product"), dict):
+        return data["product"], json_url
+    return data, json_url
 
 
 def normalize_price(price: Any) -> tuple[int | None, float | None]:
@@ -214,13 +232,13 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         json_url = product_json_url(args.url)
-        product = fetch_product(json_url, timeout=args.timeout)
+        product, source_url = fetch_product(json_url, timeout=args.timeout)
         variant = (
             find_variant(product, args.variant)
             if args.variant
             else find_variant_by_options(product, args.option)
         )
-        result = summarize_variant(product, variant, json_url)
+        result = summarize_variant(product, variant, source_url)
     except (
         ValueError,
         VariantNotFoundError,

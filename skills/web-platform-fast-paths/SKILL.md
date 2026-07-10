@@ -80,7 +80,15 @@ For Shopify, prefer this pattern before page extraction:
 
 ```bash
 python3 - <<'PY'
-import json, time, urllib.error, urllib.request
+import json, math, time, urllib.error, urllib.request
+
+def retry_delay(header, fallback, cap=60.0):
+    # Bound/validate Retry-After; ignore missing/invalid/negative/huge values.
+    try:
+        v = float(header)
+    except (TypeError, ValueError):
+        return fallback
+    return min(v, cap) if math.isfinite(v) and v >= 0 else fallback
 
 def get_product(base, handle, timeout=15, retries=3):
     # Try /products/<handle>.js, fall back to .json (wrapped under "product"),
@@ -92,11 +100,12 @@ def get_product(base, handle, timeout=15, retries=3):
                 'Accept-Encoding': 'identity',  # urllib does not decode gzip/br
             })
             try:
-                obj = json.loads(urllib.request.urlopen(req, timeout=timeout).read().decode())
+                with urllib.request.urlopen(req, timeout=timeout) as resp:
+                    obj = json.loads(resp.read().decode())
                 return obj.get('product', obj)  # .json wraps under "product"
             except urllib.error.HTTPError as e:
                 if e.code in (429, 430, 503) and attempt < retries:
-                    time.sleep(float(e.headers.get('Retry-After') or 2 ** attempt)); continue
+                    time.sleep(retry_delay(e.headers.get('Retry-After'), 2 ** attempt)); continue
                 if e.code in (404, 410):
                     break  # try the next path variant
                 raise

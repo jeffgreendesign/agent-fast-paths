@@ -68,13 +68,13 @@ def shopify_check_variant(
         return _error("provide exactly one of 'variant' or 'options'")
     try:
         json_url = _shopify.product_json_url(url)
-        product = _shopify.fetch_product(json_url, timeout=timeout)
+        product, source_url = _shopify.fetch_product(json_url, timeout=timeout)
         matched = (
             _shopify.find_variant(product, variant)
             if variant
             else _shopify.find_variant_by_options(product, options or [])
         )
-        summary = _shopify.summarize_variant(product, matched, json_url)
+        summary = _shopify.summarize_variant(product, matched, source_url)
     except (
         ValueError,
         _shopify.VariantNotFoundError,
@@ -159,7 +159,7 @@ def shopify_find_available(
 
     # 2) Sitemap discovery -> per-handle .js verification.
     if len(matches) < need:
-        handles = _discover_handles_from_sitemap(root, timeout, notes)
+        handles = _discover_handles_from_sitemap(root, timeout, notes, handle_budget=max_handles)
         for handle in handles:
             if len(matches) >= need or len(seen_handles) >= max_handles:
                 break
@@ -167,7 +167,9 @@ def shopify_find_available(
                 continue
             seen_handles.add(handle)
             try:
-                product = _shopify.fetch_product(f"{root}/products/{handle}.js", timeout=timeout)
+                product, _served = _shopify.fetch_product(
+                    f"{root}/products/{handle}.js", timeout=timeout
+                )
             except (urllib.error.URLError, _shopify.RateLimitedError, ValueError):
                 continue
             consider(product, handle)
@@ -184,7 +186,20 @@ def shopify_find_available(
 _LOC_RE = re.compile(r"<loc>([^<]+)</loc>", re.IGNORECASE)
 
 
-def _discover_handles_from_sitemap(root: str, timeout: int, notes: list[str]) -> list[str]:
+def _discover_handles_from_sitemap(
+    root: str,
+    timeout: int,
+    notes: list[str],
+    handle_budget: int = 60,
+    max_sitemaps: int = 10,
+) -> list[str]:
+    """Discover product handles from the sitemap, bounded in work.
+
+    Stops fetching sitemap-index entries as soon as ``handle_budget`` handles are
+    collected or ``max_sitemaps`` product sitemaps have been fetched, so a large
+    or hostile sitemap index can't tie up one tool call on many sequential
+    requests.
+    """
     try:
         index = _probe.fetch_text(f"{root}/sitemap.xml", timeout=timeout)
     except Exception as exc:  # noqa: BLE001 - discovery is best-effort
@@ -194,9 +209,18 @@ def _discover_handles_from_sitemap(root: str, timeout: int, notes: list[str]) ->
     product_sitemaps = [
         html.unescape(loc) for loc in _LOC_RE.findall(index) if "sitemap_products_" in loc
     ]
+    if len(product_sitemaps) > max_sitemaps:
+        notes.append(
+            f"sitemap index has {len(product_sitemaps)} product sitemaps; "
+            f"scanning first {max_sitemaps}"
+        )
+        product_sitemaps = product_sitemaps[:max_sitemaps]
+
     handles: list[str] = []
     seen: set[str] = set()
     for sm_url in product_sitemaps:
+        if len(handles) >= handle_budget:
+            break
         try:
             text = _probe.fetch_text(sm_url, timeout=timeout)
         except Exception:  # noqa: BLE001
@@ -209,6 +233,8 @@ def _discover_handles_from_sitemap(root: str, timeout: int, notes: list[str]) ->
             if handle and handle not in seen:
                 seen.add(handle)
                 handles.append(handle)
+                if len(handles) >= handle_budget:
+                    break
     if not handles:
         notes.append("no product handles discovered from sitemap")
     return handles

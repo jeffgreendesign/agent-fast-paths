@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import pathlib
 
@@ -14,14 +15,14 @@ FIXTURE = json.loads((ROOT / "tests" / "fixtures" / "shopify_product.json").read
 
 
 def test_tools_are_registered() -> None:
-    # FastMCP exposes registered tools via its (async) list; assert on the
-    # underlying manager so the test stays synchronous.
-    names = set(server.mcp._tool_manager._tools)
+    # Use FastMCP's public (async) tool-listing API rather than private internals.
+    tools = asyncio.run(server.mcp.list_tools())
+    names = {tool.name for tool in tools}
     assert {"probe_platform", "shopify_check_variant", "shopify_find_available"} <= names
 
 
 def test_shopify_check_variant_matches_xl_not_2xl(monkeypatch) -> None:
-    monkeypatch.setattr(server._shopify, "fetch_product", lambda *a, **k: FIXTURE)
+    monkeypatch.setattr(server._shopify, "fetch_product", lambda url, **k: (FIXTURE, url))
     result = server.shopify_check_variant(
         "https://example.com/products/classic-t-shirt",
         options=["Bright White", "XL"],
@@ -43,8 +44,20 @@ def test_shopify_check_variant_requires_exactly_one_selector() -> None:
     assert neither["ok"] is False
 
 
+def test_shopify_check_variant_reports_served_url_on_fallback(monkeypatch) -> None:
+    # fetch_product reports the .json URL when the .js view was disabled.
+    json_url = "https://example.com/products/classic-t-shirt.json"
+    monkeypatch.setattr(server._shopify, "fetch_product", lambda *a, **k: (FIXTURE, json_url))
+    result = server.shopify_check_variant(
+        "https://example.com/products/classic-t-shirt",
+        options=["Bright White", "XL"],
+    )
+    assert result["ok"] is True
+    assert result["source_url"] == json_url
+
+
 def test_shopify_check_variant_reports_missing_variant(monkeypatch) -> None:
-    monkeypatch.setattr(server._shopify, "fetch_product", lambda *a, **k: FIXTURE)
+    monkeypatch.setattr(server._shopify, "fetch_product", lambda url, **k: (FIXTURE, url))
     result = server.shopify_check_variant(
         "https://example.com/products/classic-t-shirt",
         options=["Bright White", "3XL"],

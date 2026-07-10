@@ -174,15 +174,38 @@ def test_fetch_json_retries_on_rate_limit_then_succeeds(monkeypatch) -> None:
     def fake_urlopen(request, timeout=15):  # noqa: ARG001
         calls["n"] += 1
         if calls["n"] < 3:
-            raise _http_error(430)
+            raise _http_error(430, retry_after="2")
         return _FakeResponse(payload)
 
+    sleeps: list[float] = []
     monkeypatch.setattr(svc.urllib.request, "urlopen", fake_urlopen)
-    monkeypatch.setattr(svc.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(svc.time, "sleep", lambda seconds: sleeps.append(seconds))
 
+    # backoff=0.0 means any non-zero sleep must come from the Retry-After header.
     result = svc.fetch_json("https://example.com/products/x.js", backoff=0.0)
     assert result == {"title": "ok"}
     assert calls["n"] == 3
+    assert sleeps == [2.0, 2.0]
+
+
+def test_retry_after_is_bounded_and_validated() -> None:
+    assert svc._retry_after_seconds(_http_error(430, retry_after="5")) == 5.0
+    # Oversized values are capped, invalid/negative/non-finite fall back to None.
+    assert svc._retry_after_seconds(_http_error(430, retry_after="99999")) == svc.MAX_RETRY_AFTER
+    assert svc._retry_after_seconds(_http_error(430, retry_after="-3")) is None
+    assert svc._retry_after_seconds(_http_error(430, retry_after="inf")) is None
+    assert svc._retry_after_seconds(_http_error(430, retry_after="nope")) is None
+    assert svc._retry_after_seconds(_http_error(430)) is None
+
+
+def test_fetch_json_rejects_non_object_payload(monkeypatch) -> None:
+    monkeypatch.setattr(
+        svc.urllib.request,
+        "urlopen",
+        lambda *a, **k: _FakeResponse(b'["not", "an", "object"]'),
+    )
+    with pytest.raises(ValueError, match="expected a JSON object"):
+        svc.fetch_json("https://example.com/products/x.js")
 
 
 def test_fetch_json_raises_rate_limited_when_exhausted(monkeypatch) -> None:
@@ -202,8 +225,9 @@ def test_fetch_product_falls_back_from_js_to_json(monkeypatch) -> None:
         return {"product": FIXTURE}
 
     monkeypatch.setattr(svc, "fetch_json", fake_fetch_json)
-    product = svc.fetch_product("https://example.com/products/classic-t-shirt.js")
+    product, source_url = svc.fetch_product("https://example.com/products/classic-t-shirt.js")
     assert product["title"] == FIXTURE["title"]
+    assert source_url == "https://example.com/products/classic-t-shirt.json"
     variant = svc.find_variant(product, "Bright White / XL")
     assert variant["id"] == 102
 
