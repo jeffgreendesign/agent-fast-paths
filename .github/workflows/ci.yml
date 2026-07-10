@@ -37,7 +37,8 @@ jobs:
           enable-cache: true
       - run: uv run --group dev ruff check .
       - run: uv run --group dev ruff format --check .
-      - run: uv run --group dev ty check
+      # ty needs the mcp dependency installed to resolve the server's imports.
+      - run: uv run --extra mcp --group dev ty check
 
   # Exercise the optional MCP extra and its tests separately.
   mcp:
