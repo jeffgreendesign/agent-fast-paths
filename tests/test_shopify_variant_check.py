@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import email.message
 import importlib.util
+import io
 import json
 import pathlib
 import sys
+import urllib.error
+from types import ModuleType
 
 import pytest
-from types import ModuleType
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 MODULE_PATH = ROOT / "examples" / "shopify_variant_check.py"
@@ -81,7 +84,9 @@ def test_summarize_variant_converts_cents() -> None:
 
 def test_cli_outputs_variant_json(capsys, monkeypatch) -> None:
     monkeypatch.setattr(svc, "fetch_json", lambda *args, **kwargs: FIXTURE)
-    code = svc.main(["https://example.com/products/classic-t-shirt", "--variant", "Bright White / XL"])
+    code = svc.main(
+        ["https://example.com/products/classic-t-shirt", "--variant", "Bright White / XL"]
+    )
     assert code == 0
     out = json.loads(capsys.readouterr().out)
     assert out["available"] is True
@@ -90,13 +95,15 @@ def test_cli_outputs_variant_json(capsys, monkeypatch) -> None:
 
 def test_cli_outputs_option_match_json(capsys, monkeypatch) -> None:
     monkeypatch.setattr(svc, "fetch_json", lambda *args, **kwargs: FIXTURE)
-    code = svc.main([
-        "https://example.com/products/classic-t-shirt",
-        "--option",
-        "Bright White",
-        "--option",
-        "XL",
-    ])
+    code = svc.main(
+        [
+            "https://example.com/products/classic-t-shirt",
+            "--option",
+            "Bright White",
+            "--option",
+            "XL",
+        ]
+    )
     assert code == 0
     out = json.loads(capsys.readouterr().out)
     assert out["variant"] == "Bright White / XL"
@@ -107,16 +114,20 @@ def test_cli_rejects_variant_and_option_together(capsys, monkeypatch) -> None:
     monkeypatch.setattr(
         svc,
         "fetch_json",
-        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("fetch_json should not be called")),
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("fetch_json should not be called")
+        ),
     )
     with pytest.raises(SystemExit) as exc:
-        svc.main([
-            "https://example.com/products/classic-t-shirt",
-            "--variant",
-            "Bright White / XL",
-            "--option",
-            "Bright White",
-        ])
+        svc.main(
+            [
+                "https://example.com/products/classic-t-shirt",
+                "--variant",
+                "Bright White / XL",
+                "--option",
+                "Bright White",
+            ]
+        )
     assert exc.value.code != 0
     assert "provide exactly one of --variant or repeatable --option" in capsys.readouterr().err
 
@@ -125,9 +136,79 @@ def test_cli_rejects_missing_selection_mode(capsys, monkeypatch) -> None:
     monkeypatch.setattr(
         svc,
         "fetch_json",
-        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("fetch_json should not be called")),
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("fetch_json should not be called")
+        ),
     )
     with pytest.raises(SystemExit) as exc:
         svc.main(["https://example.com/products/classic-t-shirt"])
     assert exc.value.code != 0
     assert "provide exactly one of --variant or repeatable --option" in capsys.readouterr().err
+
+
+class _FakeResponse:
+    def __init__(self, payload: bytes) -> None:
+        self._buf = io.BytesIO(payload)
+
+    def __enter__(self) -> _FakeResponse:
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        return None
+
+    def read(self, *args: object) -> bytes:
+        return self._buf.read()
+
+
+def _http_error(code: int, retry_after: str | None = None) -> urllib.error.HTTPError:
+    hdrs = email.message.Message()
+    if retry_after is not None:
+        hdrs["Retry-After"] = retry_after
+    return urllib.error.HTTPError("https://example.com", code, "err", hdrs, None)
+
+
+def test_fetch_json_retries_on_rate_limit_then_succeeds(monkeypatch) -> None:
+    calls = {"n": 0}
+    payload = json.dumps({"title": "ok"}).encode("utf-8")
+
+    def fake_urlopen(request, timeout=15):  # noqa: ARG001
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise _http_error(430)
+        return _FakeResponse(payload)
+
+    monkeypatch.setattr(svc.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(svc.time, "sleep", lambda _seconds: None)
+
+    result = svc.fetch_json("https://example.com/products/x.js", backoff=0.0)
+    assert result == {"title": "ok"}
+    assert calls["n"] == 3
+
+
+def test_fetch_json_raises_rate_limited_when_exhausted(monkeypatch) -> None:
+    monkeypatch.setattr(
+        svc.urllib.request, "urlopen", lambda *a, **k: (_ for _ in ()).throw(_http_error(430))
+    )
+    monkeypatch.setattr(svc.time, "sleep", lambda _seconds: None)
+
+    with pytest.raises(svc.RateLimitedError, match="rate_limited"):
+        svc.fetch_json("https://example.com/products/x.js", retries=2, backoff=0.0)
+
+
+def test_fetch_product_falls_back_from_js_to_json(monkeypatch) -> None:
+    def fake_fetch_json(url, timeout=15):  # noqa: ARG001
+        if url.endswith(".js"):
+            raise _http_error(404)
+        return {"product": FIXTURE}
+
+    monkeypatch.setattr(svc, "fetch_json", fake_fetch_json)
+    product = svc.fetch_product("https://example.com/products/classic-t-shirt.js")
+    assert product["title"] == FIXTURE["title"]
+    variant = svc.find_variant(product, "Bright White / XL")
+    assert variant["id"] == 102
+
+
+def test_fetch_product_propagates_non_404_errors(monkeypatch) -> None:
+    monkeypatch.setattr(svc, "fetch_json", lambda *a, **k: (_ for _ in ()).throw(_http_error(500)))
+    with pytest.raises(urllib.error.HTTPError):
+        svc.fetch_product("https://example.com/products/x.js")

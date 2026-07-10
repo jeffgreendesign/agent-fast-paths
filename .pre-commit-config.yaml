@@ -1,0 +1,15 @@
+# Modern Astral toolchain (2026): Ruff for lint + format, ty for type checking.
+# Install with: uv run pre-commit install
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.10.0
+    hooks:
+      - id: ruff
+        args: [--fix]
+      - id: ruff-format
+
+  - repo: https://github.com/astral-sh/ty-pre-commit
+    rev: v0.0.1a1
+    hooks:
+      - id: ty
+        args: [check]

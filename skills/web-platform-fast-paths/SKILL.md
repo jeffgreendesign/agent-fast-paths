@@ -22,6 +22,13 @@ Core principle:
 
 > Detect the platform, use its public data surface, verify the specific variant/fact, then answer concisely with caveats.
 
+As of 2026, some platforms (including Shopify and WooCommerce) ship **official
+MCP servers**. When you own the store or have credentials/scope, prefer the
+official MCP server — it is the fastest, authenticated fast path. The public
+probes in this skill are for third-party research where you only have the public
+data surface. This repo also packages these probes as its own MCP server
+(`agent_fast_paths_mcp/`) so any MCP client can call them.
+
 ## When to Use
 
 Use when the user asks for:
@@ -73,12 +80,30 @@ For Shopify, prefer this pattern before page extraction:
 
 ```bash
 python3 - <<'PY'
-import json, urllib.request
-urls = [
-  'https://example.com/products/product-handle.js',
-]
-for url in urls:
-    obj = json.loads(urllib.request.urlopen(url, timeout=15).read().decode())
+import json, time, urllib.error, urllib.request
+
+def get_product(base, handle, timeout=15, retries=3):
+    # Try /products/<handle>.js, fall back to .json (wrapped under "product"),
+    # and back off on Shopify's rate-limit statuses (430/429/503).
+    for path in (f'{base}/products/{handle}.js', f'{base}/products/{handle}.json'):
+        for attempt in range(retries + 1):
+            req = urllib.request.Request(path, headers={
+                'User-Agent': 'agent-fast-paths/1.0',
+                'Accept-Encoding': 'identity',  # urllib does not decode gzip/br
+            })
+            try:
+                obj = json.loads(urllib.request.urlopen(req, timeout=timeout).read().decode())
+                return obj.get('product', obj)  # .json wraps under "product"
+            except urllib.error.HTTPError as e:
+                if e.code in (429, 430, 503) and attempt < retries:
+                    time.sleep(float(e.headers.get('Retry-After') or 2 ** attempt)); continue
+                if e.code in (404, 410):
+                    break  # try the next path variant
+                raise
+    return None
+
+obj = get_product('https://example.com', 'product-handle')
+if obj:
     print(obj['title'], obj.get('handle'))
     for v in obj.get('variants', []):
         print(v.get('title'), v.get('available'), v.get('price'), v.get('id'))
@@ -227,6 +252,13 @@ PY
 - `/sitemap_products_1.xml` — product URL discovery.
 - `/robots.txt` — sitemap hints and crawl boundaries.
 
+2026 notes:
+
+- If `.js` is disabled (404/410), fall back to `/products/<handle>.json` (same data under a `product` key).
+- Shopify rate-limits bot traffic with **HTTP 430** (also 429/503); back off and honor `Retry-After`.
+- New Shopify features are **GraphQL-only**; the public REST/`.js`/`.json` reads still work but are legacy — verify exact fields.
+- Send `Accept-Encoding: identity` since `urllib` will not decode gzip/brotli.
+
 ## Other Platform Hints
 
 ### WooCommerce / WordPress
@@ -277,6 +309,23 @@ Look for:
 - `_payload.json`
 - `payload.js`
 - `/_nuxt/` route data references
+
+### React Router / Remix
+
+Remix merged into React Router v7 and is common on 2026 commerce/content sites. Look for:
+
+- `window.__remixContext` — loader data embedded in the HTML.
+- `<route-url>.data` — single-fetch route data (append `.data` to a route URL).
+
+Shapes vary by version/single-fetch config; treat as probes, not guarantees.
+
+### Astro
+
+Astro renders mostly static HTML with hydrated islands. Prefer JSON-LD/Open Graph first (usually present), then inspect `astro-island` elements whose `props` attribute carries JSON state.
+
+### llms.txt
+
+Some sites publish an agent-friendly content map at `/llms.txt` (and sometimes `/llms-full.txt`). When present it can point straight at canonical docs/product URLs, saving a discovery pass. Check cheaply; adoption is uneven.
 
 ### Generic structured data
 
